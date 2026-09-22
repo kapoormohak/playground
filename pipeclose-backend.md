@@ -128,47 +128,52 @@ Pipeclose uses bcrypt password hashing and JWT authentication, backed by email-b
 ```mermaid
 flowchart TD
     User([User / Browser])
-    AuthCtrl[AuthController]
-    AuthSvc[AuthService]
-    EmailSvc[EmailService]
-    UserDB[(SQLite: users / otps)]
-    ClientStorage[(Client LocalStorage / Cookie)]
+    AuthCtrl["AuthController"]
+    AuthSvc["AuthService"]
+    EmailSvc["EmailService"]
+    UserDB[("SQLite: users / otps")]
+    ClientStorage[("Client LocalStorage")]
 
     %% Registration Flow
-    User ->>|1. POST /api/auth/register (name, email, password)| AuthCtrl
-    AuthCtrl ->> AuthSvc: registerUser(payload)
-    AuthSvc ->> AuthSvc: Hash Password (bcrypt salt 10)
-    AuthSvc ->> UserDB: Insert User (isVerified = 0)
-    AuthSvc ->> AuthSvc: Generate 6-digit OTP code
-    AuthSvc ->> UserDB: Save OTP (expires in 10 mins)
-    AuthSvc ->> EmailSvc: sendVerificationEmail(email, otp)
-    EmailSvc -->> User: Deliver OTP code to inbox
-    AuthCtrl -->> User: 201 Created (Pending Verification)
+    User -->|"1. POST /api/auth/register"| AuthCtrl
+    AuthCtrl -->|"registerUser(payload)"| AuthSvc
+    AuthSvc -->|"bcrypt.hash(password, 10)"| AuthSvc
+    AuthSvc -->|"INSERT INTO users (isVerified = 0)"| UserDB
+    AuthSvc -->|"Generate 6-digit OTP"| AuthSvc
+    AuthSvc -->|"INSERT INTO otps (expires in 10m)"| UserDB
+    AuthSvc -->|"sendVerificationEmail(email, otp)"| EmailSvc
+    EmailSvc -->|"Deliver OTP email"| User
+    AuthCtrl -->|"201 Created (Pending Verification)"| User
 
     %% Verification Flow
-    User ->>|2. POST /api/auth/verify-otp (email, otp)| AuthCtrl
-    AuthCtrl ->> AuthSvc: verifyOtp(email, otp)
-    AuthSvc ->> UserDB: Query & validate OTP expiration
-    alt Valid OTP
-        AuthSvc ->> UserDB: UPDATE users SET isVerified = 1
-        AuthSvc ->> AuthSvc: Generate JWT Token (payload: userId, role)
-        AuthCtrl -->> User: 200 OK + JWT Token + Profile
-        User ->> ClientStorage: Store Bearer Token
-    else Invalid or Expired
-        AuthCtrl -->> User: 400 Bad Request (Invalid/Expired OTP)
-    end
+    User -->|"2. POST /api/auth/verify-otp"| AuthCtrl
+    AuthCtrl -->|"verifyOtp(email, otp)"| AuthSvc
+    AuthSvc -->|"SELECT * FROM otps WHERE email"| UserDB
+    UserDB -->|"Return OTP record"| AuthSvc
+    
+    CheckOtp{"Is OTP valid & not expired?"}
+    AuthSvc --> CheckOtp
+    
+    CheckOtp -- Yes --> MarkVerified["UPDATE users SET isVerified = 1"]
+    MarkVerified --> GenJWT["Generate JWT Token (userId, role)"]
+    GenJWT --> SaveToken["Return 200 OK + JWT"]
+    SaveToken -->|"Store Bearer Token"| ClientStorage
+    
+    CheckOtp -- No --> ReturnErr["Return 400 Bad Request (Invalid/Expired OTP)"]
+    ReturnErr --> User
 
     %% Login Flow
-    User ->>|3. POST /api/auth/login (email, password)| AuthCtrl
-    AuthCtrl ->> AuthSvc: login(email, password)
-    AuthSvc ->> UserDB: Find by email
-    AuthSvc ->> AuthSvc: Compare bcrypt hash
-    alt Password Matches
-        AuthSvc ->> AuthSvc: Generate JWT Token
-        AuthCtrl -->> User: 200 OK + JWT Token
-    else Credentials Mismatch
-        AuthCtrl -->> User: 401 Unauthorized
-    end
+    User -->|"3. POST /api/auth/login"| AuthCtrl
+    AuthCtrl -->|"login(email, password)"| AuthSvc
+    AuthSvc -->|"SELECT * FROM users WHERE email"| UserDB
+    UserDB -->|"Return user record"| AuthSvc
+    
+    CheckPass{"bcrypt.compare(password, hash)?"}
+    AuthSvc --> CheckPass
+    CheckPass -- Password Matches --> GenLoginJWT["Generate JWT Token"]
+    GenLoginJWT -->|"200 OK + Token"| User
+    CheckPass -- Password Mismatch --> Unauthorized["401 Unauthorized"]
+    Unauthorized --> User
 ```
 
 ---
@@ -180,49 +185,54 @@ Pipelines model customizable sales processes. Deals move across stages with auto
 ```mermaid
 flowchart TD
     Client([Sales Representative])
-    DealCtrl[DealController]
-    DealSvc[DealService]
-    PipelineModel[Pipeline & Stage Models]
-    DealModel[DealModel]
-    HistoryModel[DealHistoryModel]
-    DB[(SQLite: deals, deal_history)]
+    DealCtrl["DealController"]
+    DealSvc["DealService"]
+    PipelineModel["Pipeline & Stage Models"]
+    DealModel["DealModel"]
+    HistoryModel["DealHistoryModel"]
+    DB[("SQLite: deals, deal_history")]
 
     %% Create Deal
-    Client ->>|POST /api/deals (title, value, stageId, personId, orgId)| DealCtrl
-    DealCtrl ->> DealSvc: createDeal(dealData, userId)
-    DealSvc ->> PipelineModel: Validate stageId belongs to pipeline
-    DealSvc ->> DealModel: INSERT INTO deals (status = 'OPEN', isRotten = 0)
-    DealSvc ->> HistoryModel: Record Initial History Event
-    DealCtrl -->> Client: 201 Created (Deal Object)
+    Client -->|"POST /api/deals"| DealCtrl
+    DealCtrl -->|"createDeal(data, userId)"| DealSvc
+    DealSvc -->|"Validate stageId belongs to pipeline"| PipelineModel
+    DealSvc -->|"INSERT INTO deals (status = 'OPEN')"| DealModel
+    DealModel --> DB
+    DealSvc -->|"INSERT INTO deal_history (CREATED event)"| HistoryModel
+    HistoryModel --> DB
+    DealCtrl -->|"201 Created (Deal Object)"| Client
 
     %% Move Stage / Drag and Drop
-    Client ->>|PUT /api/deals/:id/stage (newStageId)| DealCtrl
-    DealCtrl ->> DealSvc: changeStage(dealId, newStageId, userId)
-    DealSvc ->> DealModel: Fetch current deal details
-    DealSvc ->> PipelineModel: Fetch new stage properties (probability, isWon, isLost)
-    
-    alt Stage is marked as WON
-        DealSvc ->> DealModel: UPDATE deals SET status='WON', actualCloseDate=NOW()
-    else Stage is marked as LOST
-        DealSvc ->> DealModel: UPDATE deals SET status='LOST', lostReason=...
-    else Regular Stage Progression
-        DealSvc ->> DealModel: UPDATE deals SET stageId=newStageId, probability=stage.probability
-    end
+    Client -->|"PUT /api/deals/:id/stage"| DealCtrl
+    DealCtrl -->|"changeStage(dealId, newStageId)"| DealSvc
+    DealSvc -->|"Fetch stage attributes"| PipelineModel
+    PipelineModel -->|"Stage config (isWon, isLost, probability)"| DealSvc
 
-    DealSvc ->> HistoryModel: INSERT INTO deal_history (oldStageId, newStageId, changedAt)
-    DealSvc ->> DealModel: Reset Rotten Status Timer (lastActivityAt = NOW())
-    DealCtrl -->> Client: 200 OK (Updated Deal)
+    CheckStage{"Stage Type?"}
+    DealSvc --> CheckStage
 
-    %% Background Deal Rotting Logic
-    subgraph DealRottingCheck ["Deal Rotting Evaluation (On Query / Cron)"]
-        CheckTime["Current Time - deal.lastActivityAt"]
-        Threshold{"Exceeds stage.rottenDays?"}
-        SetRotten["UPDATE deals SET isRotten = 1"]
-        ClearRotten["UPDATE deals SET isRotten = 0"]
+    CheckStage -- isWon == 1 --> MarkWon["SET status='WON', actualCloseDate=NOW()"]
+    CheckStage -- isLost == 1 --> MarkLost["SET status='LOST', lostReason=..."]
+    CheckStage -- In Progress --> SetProg["SET stageId=newStageId, probability=stage.probability"]
 
-        CheckTime --> Threshold
-        Threshold -- Yes --> SetRotten
-        Threshold -- No --> ClearRotten
+    MarkWon --> RecordHistory["INSERT INTO deal_history (oldStageId, newStageId)"]
+    MarkLost --> RecordHistory
+    SetProg --> RecordHistory
+
+    RecordHistory --> ResetActivity["UPDATE deals SET lastActivityAt=NOW(), isRotten=0"]
+    ResetActivity --> DB
+    DealCtrl -->|"200 OK (Updated Deal)"| Client
+
+    %% Rotting Subgraph
+    subgraph RottingLogic ["Deal Rotting Evaluation"]
+        CalcTime["Calculate Inactivity: NOW - lastActivityAt"]
+        CheckRotten{"Days Inactive >= stage.rottenDays?"}
+        MarkRotten["UPDATE deals SET isRotten = 1"]
+        KeepFresh["Keep isRotten = 0"]
+
+        CalcTime --> CheckRotten
+        CheckRotten -- Yes --> MarkRotten
+        CheckRotten -- No --> KeepFresh
     end
 ```
 
@@ -234,55 +244,48 @@ The email module synchronizes mail via IMAP or Google/Microsoft OAuth, listens f
 
 ```mermaid
 flowchart TD
-    subgraph EmailSources ["External Mail Services"]
+    subgraph EmailSources ["External Mail Sources"]
         IMAPServer["IMAP Mail Server"]
         Gmail["Google Gmail API / PubSub"]
     end
 
-    subgraph SyncServices ["Backend Listeners & Processors"]
-        ImapIdle["IMAP IDLE Service (Persistent TCP Socket)"]
-        GmailPush["Gmail Webhook Handler (/api/webhooks/email)"]
+    subgraph SyncServices ["Sync Services & Parsers"]
+        ImapIdle["IMAP IDLE Service (TCP Socket)"]
+        GmailPush["Gmail Webhook (/api/webhooks/email)"]
         EmailConnector["EmailConnectorService"]
         Parser["mailparser (MIME Parsing)"]
     end
 
-    subgraph DatabaseLayer ["Persistence"]
-        EmailDB[(SQLite: emails, email_accounts)]
-        DealDB[(SQLite: deals, deal_activities)]
+    subgraph Storage ["SQLite Storage"]
+        EmailDB[("emails, email_accounts")]
+        DealDB[("deals, deal_activities")]
     end
 
-    subgraph RealtimeDelivery ["Real-time & AI"]
-        SocketIO["Socket.IO Server"]
-        Summarizer["RunPod / Groq Thread Summarizer"]
-        FrontendClient["Frontend Client Dashboard"]
+    subgraph RealtimeAndAI ["Real-Time & AI Features"]
+        SocketServer["Socket.IO Server"]
+        Summarizer["Groq / RunPod AI Summarizer"]
+        Dashboard["Frontend User Dashboard"]
     end
 
-    %% IMAP Flow
-    IMAPServer -- "IMAP IDLE Event (New Message Added)" --> ImapIdle
-    ImapIdle ->> EmailConnector: fetchNewMessages(account)
+    IMAPServer -->|"New message alert (IMAP IDLE)"| ImapIdle
+    Gmail -->|"Push webhook notification"| GmailPush
 
-    %% Gmail Flow
-    Gmail -- "Push Notification (Pub/Sub Webhook)" --> GmailPush
-    GmailPush ->> EmailConnector: syncGmailAccount(account)
+    ImapIdle -->|"fetchNewMessages()"| EmailConnector
+    GmailPush -->|"syncGmailAccount()"| EmailConnector
 
-    %% Common Processing
-    EmailConnector ->> Parser: Parse raw RFC822 message body & attachments
-    Parser ->> EmailConnector: Structured Email (from, to, subject, html, text, threadId)
-    EmailConnector ->> EmailDB: Save message (Deduplicate by messageId)
+    EmailConnector -->|"Parse raw RFC822 message"| Parser
+    Parser -->|"Parsed email & attachments"| EmailConnector
 
-    %% Deal Linking
-    EmailConnector ->> DealDB: Find deal by sender/recipient email address
-    opt Linked Deal Found
-        EmailConnector ->> DealDB: Link email ID to deal & update lastActivityAt
-    end
+    EmailConnector -->|"INSERT message (dedup by messageId)"| EmailDB
 
-    %% Trigger AI Summarization
-    EmailConnector ->> Summarizer: Trigger async thread summary
-    Summarizer ->> EmailDB: Store thread summary
+    EmailConnector -->|"Lookup deal by sender/recipient email"| DealDB
+    DealDB -->|"Link email to deal & refresh lastActivityAt"| DealDB
 
-    %% Real-time Notification
-    EmailConnector ->> SocketIO: Emit 'new_email' event (payload: message, dealId)
-    SocketIO -- Push Notification --> FrontendClient
+    EmailConnector -->|"Trigger background thread summary"| Summarizer
+    Summarizer -->|"UPDATE email thread summary"| EmailDB
+
+    EmailConnector -->|"emit 'new_email' (dealId, message)"| SocketServer
+    SocketServer -->|"WebSocket notification"| Dashboard
 ```
 
 ---
@@ -295,44 +298,44 @@ The calls module enables browser-based outbound calling via Twilio Voice SDK, ha
 flowchart TD
     BrowserUser([Sales Rep in Browser])
     TwilioSDK["Twilio Client SDK (WebRTC)"]
-    CallCtrl[CallController]
-    WebhookCtrl[WebhookController]
-    CallSvc[CallService]
+    CallCtrl["CallController"]
+    WebhookCtrl["WebhookController"]
+    CallSvc["CallService"]
     TwilioAPI["Twilio Voice Cloud"]
     CustomerPhone([Customer Phone / PSTN])
-    SocketServer[Socket.IO Server]
-    CallDB[(SQLite: calls)]
+    SocketServer["Socket.IO Server"]
+    CallDB[("SQLite: calls")]
 
-    %% Token Initialization
-    BrowserUser ->>|1. GET /api/calls/token| CallCtrl
-    CallCtrl ->> CallSvc: generateCapabilityToken(userId)
-    CallSvc -->> BrowserUser: Return Twilio JWT Voice Token
+    %% Token Flow
+    BrowserUser -->|"1. GET /api/calls/token"| CallCtrl
+    CallCtrl -->|"generateCapabilityToken(userId)"| CallSvc
+    CallSvc -->|"Return Twilio Voice JWT"| BrowserUser
 
-    %% Outbound Dial
-    BrowserUser ->>|2. Call Phone Number (WebRTC)| TwilioSDK
-    TwilioSDK ->> TwilioAPI: Voice Connection Request
-    TwilioAPI ->>|3. POST /api/webhooks/twilio/voice| WebhookCtrl
-    WebhookCtrl ->> CallSvc: handleOutboundVoiceWebhook(From, To, CallSid)
-    CallSvc ->> CallDB: Create Call Record (status = 'initiated', direction = 'outbound')
-    CallSvc -->> TwilioAPI: Return TwiML (<Dial callerId="..." record="record-from-answer-dual">)
+    %% Dial Flow
+    BrowserUser -->|"2. Initiate Call (WebRTC)"| TwilioSDK
+    TwilioSDK -->|"Voice Connection Request"| TwilioAPI
+    TwilioAPI -->|"3. POST /api/webhooks/twilio/voice"| WebhookCtrl
+    WebhookCtrl -->|"handleOutboundVoiceWebhook(From, To, CallSid)"| CallSvc
+    CallSvc -->|"INSERT call (status='initiated', direction='outbound')"| CallDB
+    CallSvc -->|"Return TwiML with Dial & Recording config"| TwilioAPI
 
-    %% Ringing Customer
-    TwilioAPI ->> CustomerPhone: PSTN Outbound Call
-    TwilioAPI ->>|4. POST /api/webhooks/twilio/status| WebhookCtrl
-    WebhookCtrl ->> CallSvc: updateCallStatus(CallSid, 'ringing' / 'in-progress')
-    CallSvc ->> CallDB: Update status
-    CallSvc ->> SocketServer: Emit 'call_status' { callSid, status: 'in-progress' }
-    SocketServer -- Push Event --> BrowserUser
+    %% Outbound Leg
+    TwilioAPI -->|"PSTN Dial Call"| CustomerPhone
+    TwilioAPI -->|"4. POST /api/webhooks/twilio/status"| WebhookCtrl
+    WebhookCtrl -->|"updateCallStatus(CallSid, status)"| CallSvc
+    CallSvc -->|"UPDATE status='ringing' / 'in-progress'"| CallDB
+    CallSvc -->|"emit 'call_status'"| SocketServer
+    SocketServer -->|"Push live status"| BrowserUser
 
-    %% Call Completed & Recording
-    CustomerPhone -- Hangs up --> TwilioAPI
-    TwilioAPI ->>|5. POST /api/webhooks/twilio/status (completed, duration)| WebhookCtrl
-    WebhookCtrl ->> CallSvc: finalizeCall(CallSid, duration)
-    TwilioAPI ->>|6. POST /api/webhooks/twilio/recording (recordingUrl)| WebhookCtrl
-    WebhookCtrl ->> CallSvc: attachRecordingUrl(CallSid, recordingUrl)
-    CallSvc ->> CallDB: Update duration, status='completed', recordingUrl
-    CallSvc ->> SocketServer: Emit 'call_completed'
-    SocketServer -- Push Event --> BrowserUser
+    %% Call Finish & Recording
+    CustomerPhone -->|"Call Ended"| TwilioAPI
+    TwilioAPI -->|"5. POST /api/webhooks/twilio/status (completed)"| WebhookCtrl
+    WebhookCtrl -->|"finalizeCall(CallSid, duration)"| CallSvc
+    TwilioAPI -->|"6. POST /api/webhooks/twilio/recording (recordingUrl)"| WebhookCtrl
+    WebhookCtrl -->|"attachRecordingUrl(CallSid, url)"| CallSvc
+    CallSvc -->|"UPDATE calls SET status='completed', recordingUrl=url"| CallDB
+    CallSvc -->|"emit 'call_completed'"| SocketServer
+    SocketServer -->|"Call completed & recording available"| BrowserUser
 ```
 
 ---
@@ -343,44 +346,43 @@ The calendar module allows reps to organize meetings and tasks. A background cro
 
 ```mermaid
 flowchart TD
-    User([User])
-    CalCtrl[CalendarController]
-    CalSvc[CalendarService]
-    CalDB[(SQLite: calendar_events, event_reminders, event_notifications)]
-    CronWorker["Cron Job: reminderProcessor (Runs every 1 min)"]
-    Dispatcher[NotificationDispatcherService]
-    SocketServer[Socket.IO]
-    EmailSvc[EmailService]
+    User([User / Browser])
+    CalCtrl["CalendarController"]
+    CalSvc["CalendarService"]
+    CalDB[("SQLite: calendar_events, reminders, notifications")]
+    CronWorker["Cron: reminderProcessor (Runs every 1m)"]
+    Dispatcher["NotificationDispatcherService"]
+    SocketServer["Socket.IO Server"]
+    EmailSvc["EmailService"]
 
-    %% Event Scheduling
-    User ->>|POST /api/calendar/events (title, startTime, reminders: [15, 60])| CalCtrl
-    CalCtrl ->> CalSvc: createEvent(eventData, userId)
-    CalSvc ->> CalDB: INSERT INTO calendar_events
-    loop For each reminder offset
-        CalSvc ->> CalDB: Calculate triggerTime = startTime - offset minutes
-        CalSvc ->> CalDB: INSERT INTO event_reminders (triggerTime, status = 'PENDING')
-    end
-    CalCtrl -->> User: 201 Created
+    %% Scheduling
+    User -->|"POST /api/calendar/events"| CalCtrl
+    CalCtrl -->|"createEvent(payload, userId)"| CalSvc
+    CalSvc -->|"INSERT INTO calendar_events"| CalDB
+    CalSvc -->|"Compute triggerTime (startTime - offset)"| CalSvc
+    CalSvc -->|"INSERT INTO event_reminders (status='PENDING')"| CalDB
+    CalCtrl -->|"201 Created"| User
 
-    %% Background Cron Processing
-    CronWorker ->> CalDB: SELECT * FROM event_reminders WHERE triggerTime <= NOW() AND status = 'PENDING'
-    CalDB -->> CronWorker: Due Reminders List
+    %% Cron Processing
+    CronWorker -->|"SELECT * FROM event_reminders WHERE triggerTime <= NOW()"| CalDB
+    CalDB -->|"Due reminders list"| CronWorker
+    CronWorker -->|"dispatchReminder(reminder)"| Dispatcher
+    Dispatcher -->|"Fetch event & user details"| CalDB
 
-    loop For each due reminder
-        CronWorker ->> Dispatcher: dispatchReminder(reminder)
-        Dispatcher ->> CalDB: Fetch Event & User Details
-        
-        alt In-App / Push Notification
-            Dispatcher ->> SocketServer: Emit 'calendar_reminder' { eventTitle, startTime }
-            SocketServer -- Live Alert --> User
-        else Email Alert Requested
-            Dispatcher ->> EmailSvc: sendReminderEmail(user.email, eventDetails)
-            EmailSvc -- Deliver Email --> User
-        end
+    CheckChannel{"Notification Channel?"}
+    Dispatcher --> CheckChannel
 
-        Dispatcher ->> CalDB: UPDATE event_reminders SET status = 'SENT', sentAt = NOW()
-        Dispatcher ->> CalDB: INSERT INTO event_notifications (status = 'DISPATCHED')
-    end
+    CheckChannel -- In-App Push --> PushAlert["emit 'calendar_reminder'"]
+    PushAlert --> SocketServer
+    SocketServer -->|"Instant popup alert"| User
+
+    CheckChannel -- Email Reminder --> MailAlert["sendReminderEmail()"]
+    MailAlert --> EmailSvc
+    EmailSvc -->|"Deliver notification email"| User
+
+    PushAlert --> UpdateReminder["UPDATE event_reminders SET status='SENT', sentAt=NOW()"]
+    MailAlert --> UpdateReminder
+    UpdateReminder -->|"INSERT INTO event_notifications"| CalDB
 ```
 
 ---
@@ -391,41 +393,43 @@ The AI Agent acts as an in-context sales copilot. It synthesizes client history,
 
 ```mermaid
 flowchart TD
-    Rep([Sales Rep])
-    AICtrl[SuggestionController]
-    Orchestrator[SuggestionOrchestratorService]
-    
-    subgraph ContextRetrieval ["Context Extraction Engine"]
-        ClientProfileModel[ClientProfileModel]
-        BrandModel[BrandGuidelinesModel]
-        PricingModel[PricingModel]
-        HistoryModel[Email & Activity History]
+    Rep([Sales Representative])
+    AICtrl["SuggestionController"]
+    Orchestrator["SuggestionOrchestratorService"]
+
+    subgraph ContextEngine ["Context Extraction Engine"]
+        ClientProfileModel["ClientProfileModel"]
+        BrandModel["BrandGuidelinesModel"]
+        PricingModel["PricingModel"]
+        HistoryModel["Email & Activity History"]
     end
 
-    GroqService[GroqApiService / LLM Inference]
-    QA[QualityAssuranceService]
-    DB[(SQLite: ai_suggestions)]
+    GroqService["GroqApiService (LLM Inference)"]
+    QA["QualityAssuranceService"]
+    AIDB[("SQLite: ai_suggestions")]
 
-    Rep ->>|POST /api/ai/suggest (dealId / threadId)| AICtrl
-    AICtrl ->> Orchestrator: generateNextBestAction(dealId)
-    
-    %% Aggregating Context
-    par Fetch Context In Parallel
-        Orchestrator ->> ClientProfileModel: Get client industry, past pain points
-        Orchestrator ->> BrandModel: Get company tone of voice & rules
-        Orchestrator ->> PricingModel: Get eligible packages & pricing
-        Orchestrator ->> HistoryModel: Get recent emails, call notes & stage
-    end
+    Rep -->|"POST /api/ai/suggest (dealId)"| AICtrl
+    AICtrl -->|"generateNextBestAction(dealId)"| Orchestrator
 
-    Orchestrator ->> Orchestrator: Assemble Structured Prompt (System Rules + Context)
-    Orchestrator ->> GroqService: Request Chat Completion (e.g. LLaMA-3 / Mixtral)
-    GroqService -->> Orchestrator: Generated Suggestion (action, draftReply, reasoning)
-    
-    Orchestrator ->> QA: Validate output (Ensure no hallucinations or forbidden pricing)
-    QA -->> Orchestrator: Approved Suggestion
-    
-    Orchestrator ->> DB: INSERT INTO ai_suggestions (dealId, suggestion, status='PENDING')
-    AICtrl -->> Rep: 200 OK + AI Suggestion & Editable Draft
+    Orchestrator -->|"Fetch client pain points & profile"| ClientProfileModel
+    Orchestrator -->|"Fetch company tone & communication rules"| BrandModel
+    Orchestrator -->|"Fetch applicable tiers & discount limits"| PricingModel
+    Orchestrator -->|"Fetch last 5 emails & call notes"| HistoryModel
+
+    ClientProfileModel --> Orchestrator
+    BrandModel --> Orchestrator
+    PricingModel --> Orchestrator
+    HistoryModel --> Orchestrator
+
+    Orchestrator -->|"Synthesize prompt with context & system prompt"| Orchestrator
+    Orchestrator -->|"Chat Completion request (LLaMA-3 / Mixtral)"| GroqService
+    GroqService -->|"Generated suggestion & draft response"| Orchestrator
+
+    Orchestrator -->|"Validate output against safety & pricing rules"| QA
+    QA -->|"Approved suggestion payload"| Orchestrator
+
+    Orchestrator -->|"INSERT INTO ai_suggestions (status='PENDING')"| AIDB
+    AICtrl -->|"200 OK (Action Suggestion + Email Draft)"| Rep
 ```
 
 ---
@@ -437,33 +441,44 @@ The data import module supports importing contacts, organizations, and leads via
 ```mermaid
 flowchart TD
     Admin([User / Admin])
-    ImportCtrl[ImportController]
-    ImportSvc[ImportService]
-    Processor[Person / Org Processor]
-    DB[(SQLite Database)]
+    ImportCtrl["ImportController"]
+    ImportSvc["ImportService"]
+    Processors["Person & Organization Processors"]
+    ImportDB[("SQLite: imports, persons, organisations")]
 
-    Admin ->>|1. POST /api/import/upload (CSV File)| ImportCtrl
-    ImportCtrl ->> ImportSvc: parseFileHeadersAndPreview(file)
-    ImportSvc -->> Admin: Return detected columns & row preview (Sample 5 rows)
+    %% Upload
+    Admin -->|"1. POST /api/import/upload (CSV / Excel)"| ImportCtrl
+    ImportCtrl -->|"parseFileHeadersAndPreview(file)"| ImportSvc
+    ImportSvc -->|"Read header row & sample 5 rows"| ImportSvc
+    ImportCtrl -->|"Return detected columns & preview data"| Admin
 
-    Admin ->>|2. POST /api/import/execute (importId, fieldMappings)| ImportCtrl
-    ImportCtrl ->> ImportSvc: processImport(importId, fieldMappings)
+    %% Execute
+    Admin -->|"2. POST /api/import/execute (importId, fieldMappings)"| ImportCtrl
+    ImportCtrl -->|"processImport(importId, fieldMappings)"| ImportSvc
     
-    ImportSvc ->> ImportSvc: Open SQLite Transaction
-    loop For each CSV record
-        ImportSvc ->> Processor: Map CSV columns to Schema fields
-        Processor ->> Processor: Validate format (valid email, required fields)
-        alt Valid Record
-            Processor ->> DB: INSERT / UPDATE entity
-            ImportSvc ->> ImportSvc: incrementSuccessCount()
-        else Invalid Record
-            ImportSvc ->> ImportSvc: logError(rowNumber, reason)
-        end
-    end
-    
-    ImportSvc ->> ImportSvc: Commit Transaction
-    ImportSvc ->> DB: UPDATE imports SET status='COMPLETED', successCount, errorCount
-    ImportCtrl -->> Admin: 200 OK (Import Summary & Error Log)
+    ImportSvc -->|"Begin SQLite Transaction"| ImportDB
+
+    ImportSvc -->|"Iterate rows with field mapping"| Processors
+    Processors -->|"Validate required fields & formats"| Processors
+
+    CheckRow{"Valid Record?"}
+    Processors --> CheckRow
+
+    CheckRow -- Valid --> InsertEntity["INSERT INTO persons / organisations"]
+    InsertEntity --> ImportDB
+    InsertEntity --> IncSuccess["incrementSuccessCount()"]
+
+    CheckRow -- Invalid --> LogError["Record row error details"]
+    LogError --> IncError["incrementErrorCount()"]
+
+    IncSuccess --> CheckMore{"More rows?"}
+    IncError --> CheckMore
+
+    CheckMore -- Yes --> Processors
+    CheckMore -- No --> CommitTx["Commit SQLite Transaction"]
+    CommitTx --> Finalize["UPDATE imports SET status='COMPLETED'"]
+    Finalize --> ImportDB
+    ImportCtrl -->|"200 OK (Import stats & error report)"| Admin
 ```
 
 ---
